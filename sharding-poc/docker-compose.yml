@@ -1,0 +1,95 @@
+version: '3.8'
+
+services:
+  # Shard 0 - PostgreSQL
+  postgres_shard_0:
+    image: postgres:15-alpine
+    container_name: postgres_shard_0
+    environment:
+      POSTGRES_USER: sharduser
+      POSTGRES_PASSWORD: shardpass
+      POSTGRES_DB: shard_0
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./init_db.sql:/docker-entrypoint-initdb.d/init_db.sql
+      - shard_0_data:/var/lib/postgresql/data
+    networks:
+      - shard_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sharduser -d shard_0"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Shard 1 - PostgreSQL
+  postgres_shard_1:
+    image: postgres:15-alpine
+    container_name: postgres_shard_1
+    environment:
+      POSTGRES_USER: sharduser
+      POSTGRES_PASSWORD: shardpass
+      POSTGRES_DB: shard_1
+    ports:
+      - "5433:5432"
+    volumes:
+      - ./init_db.sql:/docker-entrypoint-initdb.d/init_db.sql
+      - shard_1_data:/var/lib/postgresql/data
+    networks:
+      - shard_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sharduser -d shard_1"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # PgBouncer - Connection Pooler/Proxy
+  pgbouncer:
+    image: edoburu/pgbouncer:latest
+    container_name: pgbouncer
+    environment:
+      DATABASE_URL: "postgres://sharduser:shardpass@postgres_shard_0:5432/shard_0"
+      POOL_MODE: transaction
+      MAX_CLIENT_CONN: 100
+      DEFAULT_POOL_SIZE: 20
+    ports:
+      - "6432:5432"
+    volumes:
+      - ./pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini
+      - ./userlist.txt:/etc/pgbouncer/userlist.txt
+    depends_on:
+      - postgres_shard_0
+      - postgres_shard_1
+    networks:
+      - shard_network
+
+  # Go API Server
+  api_server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: api_server
+    ports:
+      - "8080:8080"
+    environment:
+      SHARD_0_DSN: "host=postgres_shard_0 port=5432 user=sharduser password=shardpass dbname=shard_0 sslmode=disable"
+      SHARD_1_DSN: "host=postgres_shard_1 port=5432 user=sharduser password=shardpass dbname=shard_1 sslmode=disable"
+      PGBOUNCER_DSN: "host=pgbouncer port=5432 user=sharduser password=shardpass dbname=shard_0 sslmode=disable"
+    depends_on:
+      postgres_shard_0:
+        condition: service_healthy
+      postgres_shard_1:
+        condition: service_healthy
+      pgbouncer:
+        condition: service_started
+    networks:
+      - shard_network
+    restart: on-failure
+
+networks:
+  shard_network:
+    driver: bridge
+
+volumes:
+  shard_0_data:
+  shard_1_data:
